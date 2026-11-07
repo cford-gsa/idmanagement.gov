@@ -8,6 +8,7 @@ website publishes now. Writes summary.json and pr-body.md to --out (default RUN_
 Exit codes: 0 publish, 10 rerun, 20 needs review, 1 fail.
 """
 import argparse
+import os
 import hashlib
 import json
 import sys
@@ -232,6 +233,8 @@ def main():
         summary = {'outcome': 'fail', 'exit_code': FAIL, 'problems': [str(error)]}
         (out / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
         print('fail:', error)
+        if os.environ.get('GITHUB_ACTIONS'):
+            print(f'::error title=Check result: fail::{error}')
         return FAIL
     (out / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
     (out / 'pr-body.md').write_text(body(summary, args.note))
@@ -242,6 +245,16 @@ def main():
         print('warning:', warning)
     for entry in summary['removed']:
         print('removed:', entry['subject'], '|', entry['reason'])
+    if os.environ.get('GITHUB_ACTIONS'):
+        # Annotations are readable on public repositories without signing in.
+        level = 'notice' if summary['outcome'] == 'publish' else 'error'
+        reasons = summary['problems'] + summary['rerun_reasons'] + summary['review_reasons']
+        print(f"::{level} title=Check result: {summary['outcome']}::"
+              f"{'; '.join(reasons) or 'no issues'}. Added {len(summary['added'])}, removed {len(summary['removed'])}.")
+        for warning in summary['warnings']:
+            print(f'::warning title=Check warning::{warning[:900]}')
+        for entry in summary['removed'][:5]:
+            print(f"::warning title=Removed certificate::{entry['subject'][:300]} | {entry['reason']}")
     return summary['exit_code']
 
 

@@ -99,7 +99,9 @@ jobs:
             out="$RUNNER_TEMP/attempt-$attempt"
             mkdir -p "$out"
             echo "::group::Attempt $attempt"
-            if (cd crawler/py-crawler && OUTPUT_DIR="$out" timeout 30m python -m py_crawler); then
+            started=$(date +%s)
+            if (cd crawler/py-crawler && set -o pipefail && OUTPUT_DIR="$out" timeout 30m python -m py_crawler 2>&1 | tee "$out/console.log"); then
+              echo "::notice title=Crawl finished::Attempt $attempt took $(( $(date +%s) - started )) seconds."
               set +e
               python site/.github/fpki-crawler/check_run.py "$out" site/_implement/tools \
                 --exclusions crawler/py-crawler/exclude_thumbprints.txt \
@@ -107,7 +109,7 @@ jobs:
               code=$?
               set -e
             else
-              echo "The crawler exited with an error."
+              echo "::error title=Crawler exited with an error::$(tail -n 8 "$out/console.log" 2>/dev/null | tr '\n' ' ' | cut -c1-900)"
               code=10
             fi
             echo "::endgroup::"
