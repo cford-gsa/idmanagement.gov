@@ -90,9 +90,21 @@ jobs:
         if: steps.week.outputs.skip != 'true'
         run: pip install --require-hashes --no-deps -r site/.github/fpki-crawler/requirements.txt
 
+      - name: Record whether DoD revocation servers respond
+        if: steps.week.outputs.skip != 'true'
+        run: |
+          for url in http://ocsp.disa.mil/ http://crl.disa.mil/ http://repo.fpki.gov/; do
+            result=$(curl -s -o /dev/null --max-time 10 -w '%{http_code} in %{time_total}s' "$url" || echo "no response within 10s")
+            echo "::notice title=Server check::$url $result"
+          done
+
       - name: Crawl and check, rerunning when the result looks incomplete
         id: crawl
         if: steps.week.outputs.skip != 'true'
+        env:
+          # Java waits 15 seconds for each unreachable OCSP server, but the crawler stops the
+          # Java helper after 10. Accepted certificates are decided by CRLs, so wait 1 second.
+          JAVA_TOOL_OPTIONS: -Dcom.sun.security.ocsp.timeout=1
         run: |
           result=fail
           for attempt in $(seq 1 "$ATTEMPTS"); do
