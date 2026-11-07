@@ -88,7 +88,7 @@ def details(der, cert):
 
 def check(run_dir, baseline_dir, exclusions_file=None, today=None):
     today = today or datetime.now(timezone.utc).date()
-    problems, reruns, reviews = [], [], []
+    problems, reruns, reviews, warnings = [], [], [], []
     bundle, report, valid, bad, graph = load(run_dir)
     old_bundle, old_report, old_valid, _, _ = load(baseline_dir)
 
@@ -106,8 +106,14 @@ def check(run_dir, baseline_dir, exclusions_file=None, today=None):
 
     helper_failures = [r for r in bad if any(text in json.dumps(r.get('pathbuilder-result', {}))
                                              for text in HELPER_FAILURES)]
-    if helper_failures:
-        reruns.append(f'{len(helper_failures)} validations failed or timed out in the Java helper')
+    published_keys = {key(r) for r in old_valid}
+    affected = [r for r in helper_failures if key(r) in published_keys]
+    if affected:
+        reruns.append(f'{len(affected)} published certificates failed or timed out in the Java helper')
+    elif helper_failures:
+        # Timeouts on certificates that were not published leave the bundle unchanged.
+        warnings.append(f'{len(helper_failures)} validations of unpublished certificates failed or timed out '
+                        'in the Java helper: ' + '; '.join(short(r['subject']) for r in helper_failures))
 
     bundle_serials = {int(c.serial_number) for _, c in bundle.values()}
     valid_serials = {int(r['serial-number']) for r in valid}
@@ -165,6 +171,7 @@ def check(run_dir, baseline_dir, exclusions_file=None, today=None):
     return {
         'outcome': {PUBLISH: 'publish', RERUN: 'rerun', REVIEW: 'review', FAIL: 'fail'}[outcome],
         'exit_code': outcome, 'problems': problems, 'rerun_reasons': reruns, 'review_reasons': reviews,
+        'warnings': warnings,
         'counts': {'bundle': len(bundle), 'previous_bundle': len(old_bundle), 'accepted': len(valid),
                    'rejected': len(bad), 'graph_nodes': len(nodes), 'graph_edges': len(edges)},
         'added': added, 'removed': removed,
@@ -198,6 +205,8 @@ def body(summary, note):
         lines.append('Left out of the bundle by the exclusion list: '
                      + '; '.join(summary['left_out_by_exclusions']) + '.')
         lines.append('')
+    if summary.get('warnings'):
+        lines += ['**Warnings:**', ''] + [f'- {w}' for w in summary['warnings']] + ['']
     lines.append(f'Report: {counts["accepted"]} accepted, {counts["rejected"]} rejected. '
                  f'Graph: {counts["graph_nodes"]} authorities, {counts["graph_edges"]} relationships.')
     if note:
