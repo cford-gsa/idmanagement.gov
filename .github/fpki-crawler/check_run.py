@@ -238,6 +238,10 @@ def main():
     print(summary['outcome'], '|', '; '.join(summary['problems'] + summary['rerun_reasons']
                                             + summary['review_reasons']) or 'no issues',
           '| added', len(summary['added']), 'removed', len(summary['removed']))
+    for warning in summary['warnings']:
+        print('warning:', warning)
+    for entry in summary['removed']:
+        print('removed:', entry['subject'], '|', entry['reason'])
     return summary['exit_code']
 
 

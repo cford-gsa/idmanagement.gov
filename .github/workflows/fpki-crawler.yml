@@ -24,8 +24,10 @@ env:
   CRAWLER_COMMIT: a8b0eee3b8cb2709c4f67b083b144ba27f9683f6
   JAR_SHA256: 1c26d064e89c1b520213979b74145a75b2db040051d3e3a2397f2128986a2b36
   ROOT_SHA256: 5f9aecc24616b2191372600dd80f6dd320c8ca5a0ceb7f09c985ebf0696934fc
-  ATTEMPTS: '3'
-  RETRY_WAIT_SECONDS: '1800'
+  # One attempt while the workflow is being proven: anything unusual fails visibly.
+  # Set to '2' later for a single retry.
+  ATTEMPTS: '1'
+  RETRY_WAIT_SECONDS: '900'
 
 jobs:
   generate:
@@ -113,8 +115,8 @@ jobs:
               0)  result=publish; break ;;
               20) result=review; break ;;
               1)  result=fail; break ;;
-              10) if [ "$attempt" -lt "$ATTEMPTS" ]; then sleep "$RETRY_WAIT_SECONDS"; fi
-                  if [ -f "$out/summary.json" ]; then result=review; else result=fail; fi ;;
+              10) result=fail
+                  if [ "$attempt" -lt "$ATTEMPTS" ]; then sleep "$RETRY_WAIT_SECONDS"; fi ;;
             esac
           done
           echo "result=$result" >> "$GITHUB_OUTPUT"
