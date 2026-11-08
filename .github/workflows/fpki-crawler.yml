@@ -1,15 +1,16 @@
-# Runs the GSA FPKI crawler weekly, checks the result, and opens a PR into staging
-# that updates the same four paths as the manual process. A person reviews and merges.
+# Runs the GSA FPKI crawler weekly, checks the result, and pushes a branch that updates the
+# same four paths as the manual process. It then opens a weekly issue with the summary and a
+# link that opens a prefilled PR. A person opens the PR, reviews it and merges it.
 name: FPKI crawler update
 
 on:
   schedule:
     - cron: '0 14 * * 1'   # Monday 14:00 UTC
-    - cron: '0 14 * * 2'   # Tuesday safety net. Stops early if this week's PR already exists
+    - cron: '0 14 * * 2'   # Tuesday safety net. Stops early if this week's issue already exists
   workflow_dispatch:
     inputs:
-      open_pr:
-        description: Open a PR. Turn off to only generate and check the files
+      push_branch:
+        description: Push the update branch and open the weekly issue. Turn off to only generate and check the files
         type: boolean
         default: true
 
@@ -35,7 +36,7 @@ jobs:
     timeout-minutes: 150
     permissions:
       contents: read
-      pull-requests: read
+      issues: read
     outputs:
       result: ${{ steps.crawl.outputs.result }}
       week: ${{ steps.week.outputs.week }}
@@ -48,7 +49,7 @@ jobs:
           path: site
           persist-credentials: false
 
-      - name: Stop if this week's PR already exists
+      - name: Stop if this week's issue already exists
         id: week
         env:
           GH_TOKEN: ${{ github.token }}
@@ -56,14 +57,14 @@ jobs:
           week="$(TZ=America/New_York date +%G-W%V)"
           echo "week=$week" >> "$GITHUB_OUTPUT"
           echo "run_date=$(TZ=America/New_York date +%F)" >> "$GITHUB_OUTPUT"
-          # A scheduled run stops if this week's PR exists in any state, including one a person closed.
-          # A branch without a PR, left by a failed PR step, does not stop it.
+          # A scheduled run stops if this week's issue exists in any state, including one a person
+          # closed. A branch without an issue, left by a failed step, does not stop it.
           if [ "${{ github.event_name }}" = schedule ]; then
-            pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "fpki-crawler/$week" --state all \
-              --json number --jq '.[0].number')"
-            if [ -n "$pr" ]; then
+            issue="$(gh issue list --repo "$GITHUB_REPOSITORY" --state all --limit 100 --json number,body \
+              --jq "map(select(.body | contains(\"fpki-crawler-branch: fpki-crawler/$week \"))) | .[0].number // empty")"
+            if [ -n "$issue" ]; then
               echo "skip=true" >> "$GITHUB_OUTPUT"
-              echo "This week's PR already exists: #$pr." >> "$GITHUB_STEP_SUMMARY"
+              echo "This week's issue already exists: #$issue." >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
 
@@ -171,12 +172,12 @@ jobs:
     needs: generate
     if: >-
       (needs.generate.outputs.result == 'publish' || needs.generate.outputs.result == 'review') &&
-      (github.event_name == 'schedule' || inputs.open_pr)
+      (github.event_name == 'schedule' || inputs.push_branch)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write
-      pull-requests: write
+      issues: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -199,12 +200,17 @@ jobs:
           echo "$changed"
           [ -n "$changed" ] && [ -z "$(comm -23 <(echo "$changed") <(echo "$allowed"))" ]
 
-      - name: Commit, push and open the PR
+      - name: Commit, push the branch and open the weekly issue
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RESULT: ${{ needs.generate.outputs.result }}
           WEEK: ${{ needs.generate.outputs.week }}
           RUN_DATE: ${{ needs.generate.outputs.run_date }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # Who to mention in the issue, for example "@user1 @user2". Set as a repository
+          # variable. Leave it unset in forks so test runs notify no one.
+          NOTIFY: ${{ vars.FPKI_CRAWLER_NOTIFY }}
         run: |
           branch="fpki-crawler/$WEEK"
           git config user.name 'github-actions[bot]'
@@ -216,28 +222,59 @@ jobs:
           # version seen here. An empty value means the branch must not exist.
           seen="$(git ls-remote origin "refs/heads/$branch" | cut -f1)"
           git push --force-with-lease="refs/heads/$branch:$seen" origin "$branch"
-          # The team finds these PRs by searching for "automatic crawler update".
-          title="automatic crawler update, $(date -d "$RUN_DATE" '+%b %-d, %Y')"
+
+          # One issue per week, found by a marker in its body. A rerun updates the open one.
+          marker="<!-- fpki-crawler-branch: $branch -->"
+          title="$(date -d "$RUN_DATE" +%m%d) FPKI Graph Update"
           if [ "$RESULT" = review ]; then title="$title (needs review)"; fi
-          # Always pass --repo. In a fork, gh would otherwise default to the parent.
-          pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open \
-            --json number,isDraft --jq '.[0] | select(.) | "\(.number) \(.isDraft)"')"
-          if [ -n "$pr" ]; then
-            read -r number is_draft <<< "$pr"
-            gh pr edit "$number" --repo "$GITHUB_REPOSITORY" --title "$title" \
-              --body-file "$RUNNER_TEMP/final/pr-body.md"
-            if [ "$RESULT" = review ] && [ "$is_draft" = false ]; then
-              gh pr ready "$number" --repo "$GITHUB_REPOSITORY" --undo
-            elif [ "$RESULT" = publish ] && [ "$is_draft" = true ]; then
-              gh pr ready "$number" --repo "$GITHUB_REPOSITORY"
-            fi
-            echo "::notice title=PR updated::#$number now holds this run's files."
+          number="$(gh issue list --state open --limit 100 --json number,body \
+            --jq "map(select(.body | contains(\"fpki-crawler-branch: $branch \"))) | .[0].number // empty")"
+          if [ -z "$number" ]; then
+            url="$(gh issue create --title "$title" --body "$marker
+          Automatically Created. Preparing the summary.")"
+            number="${url##*/}"
+            action=created
           else
-            draft=""
-            if [ "$RESULT" = review ]; then draft="--draft"; fi
-            gh pr create --repo "$GITHUB_REPOSITORY" --base staging --head "$branch" --title "$title" \
-              --body-file "$RUNNER_TEMP/final/pr-body.md" $draft
+            action=updated
           fi
+
+          # The link opens GitHub's new PR page with the title and description filled in.
+          # Long summaries are left out of the link, since very long URLs can fail.
+          link="$(python3 - "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$branch" "$RUN_DATE" "$number" \
+            "$RESULT" "$RUNNER_TEMP/final/pr-body.md" <<'EOF'
+          import sys, urllib.parse
+          from datetime import date
+          repo, branch, run_date, number, result, body_file = sys.argv[1:]
+          title = 'automatic crawler update, ' + date.fromisoformat(run_date).strftime('%b %-d, %Y')
+          if result == 'review':
+              title += ' (needs review)'
+          summary = open(body_file).read()
+          def url(body):
+              query = urllib.parse.urlencode({'quick_pull': 1, 'title': title, 'body': body})
+              return f'{repo}/compare/staging...{branch}?{query}'
+          full = url(f'Closes #{number}\n\n{summary}')
+          print(full if len(full) <= 6000 else url(f'Closes #{number}\n\nThe full summary is in #{number}.'))
+          EOF
+          )"
+          {
+            echo "$marker"
+            echo "Automatically Created by the FPKI crawler workflow.${NOTIFY:+ $NOTIFY}"
+            echo
+            echo "**Next step:** [open the pull request]($link). The title and description are filled in."
+            echo "Check the files, then select **Create pull request**."
+            echo
+            echo "Result: **$RESULT**. Branch \`$branch\`, commit \`$(git rev-parse --short HEAD)\`. [Workflow run]($RUN_URL)."
+            echo
+            echo '---'
+            echo
+            cat "$RUNNER_TEMP/final/pr-body.md"
+          } > "$RUNNER_TEMP/issue-body.md"
+          gh issue edit "$number" --title "$title" --body-file "$RUNNER_TEMP/issue-body.md"
+          if [ "$action" = updated ]; then
+            gh issue comment "$number" --body "Updated by a rerun: the branch now holds commit \`$(git rev-parse --short HEAD)\` from [this run]($RUN_URL)."
+          fi
+          echo "::notice title=Issue $action::#$number. Branch $branch is ready for a PR."
+          echo "Issue #$number $action. Branch \`$branch\` is ready. [Open the PR]($link)." >> "$GITHUB_STEP_SUMMARY"
 
   notify:
     needs: [generate, publish]
