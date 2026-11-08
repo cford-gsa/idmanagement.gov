@@ -35,6 +35,7 @@ jobs:
     timeout-minutes: 150
     permissions:
       contents: read
+      pull-requests: read
     outputs:
       result: ${{ steps.crawl.outputs.result }}
       week: ${{ steps.week.outputs.week }}
@@ -47,17 +48,23 @@ jobs:
           path: site
           persist-credentials: false
 
-      - name: Stop if this week's update already exists
+      - name: Stop if this week's PR already exists
         id: week
-        working-directory: site
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           week="$(TZ=America/New_York date +%G-W%V)"
           echo "week=$week" >> "$GITHUB_OUTPUT"
           echo "run_date=$(TZ=America/New_York date +%F)" >> "$GITHUB_OUTPUT"
-          if [ "${{ github.event_name }}" = schedule ] && \
-             git ls-remote --exit-code "https://github.com/${{ github.repository }}" "refs/heads/fpki-crawler/$week" >/dev/null; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "This week's update branch already exists." >> "$GITHUB_STEP_SUMMARY"
+          # A scheduled run stops if this week's PR exists in any state, including one a person closed.
+          # A branch without a PR, left by a failed PR step, does not stop it.
+          if [ "${{ github.event_name }}" = schedule ]; then
+            pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "fpki-crawler/$week" --state all \
+              --json number --jq '.[0].number')"
+            if [ -n "$pr" ]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "This week's PR already exists: #$pr." >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
 
       - name: Check out the crawler at the pinned commit
@@ -197,13 +204,32 @@ jobs:
           git switch -c "$branch"
           git add _implement/fpki_notifications.md _implement/tools
           git commit -m "automatic crawler update ($RUN_DATE)"
-          git push origin "$branch"
-          title="FPKI graph update, $(date -d "$RUN_DATE" '+%b %-d, %Y')"
-          draft=""
-          if [ "$RESULT" = review ]; then draft="--draft"; title="$title (needs review)"; fi
-          # Always target this repository. In a fork, gh would otherwise default to the parent.
-          gh pr create --repo "$GITHUB_REPOSITORY" --base staging --head "$branch" --title "$title" \
-            --body-file "$RUNNER_TEMP/final/pr-body.md" $draft
+          # A branch left by an earlier run this week is replaced, but only if it is still the
+          # version seen here. An empty value means the branch must not exist.
+          seen="$(git ls-remote origin "refs/heads/$branch" | cut -f1)"
+          git push --force-with-lease="refs/heads/$branch:$seen" origin "$branch"
+          # The team finds these PRs by searching for "automatic crawler update".
+          title="automatic crawler update, $(date -d "$RUN_DATE" '+%b %-d, %Y')"
+          if [ "$RESULT" = review ]; then title="$title (needs review)"; fi
+          # Always pass --repo. In a fork, gh would otherwise default to the parent.
+          pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open \
+            --json number,isDraft --jq '.[0] | select(.) | "\(.number) \(.isDraft)"')"
+          if [ -n "$pr" ]; then
+            read -r number is_draft <<< "$pr"
+            gh pr edit "$number" --repo "$GITHUB_REPOSITORY" --title "$title" \
+              --body-file "$RUNNER_TEMP/final/pr-body.md"
+            if [ "$RESULT" = review ] && [ "$is_draft" = false ]; then
+              gh pr ready "$number" --repo "$GITHUB_REPOSITORY" --undo
+            elif [ "$RESULT" = publish ] && [ "$is_draft" = true ]; then
+              gh pr ready "$number" --repo "$GITHUB_REPOSITORY"
+            fi
+            echo "::notice title=PR updated::#$number now holds this run's files."
+          else
+            draft=""
+            if [ "$RESULT" = review ]; then draft="--draft"; fi
+            gh pr create --repo "$GITHUB_REPOSITORY" --base staging --head "$branch" --title "$title" \
+              --body-file "$RUNNER_TEMP/final/pr-body.md" $draft
+          fi
 
   notify:
     needs: [generate, publish]
