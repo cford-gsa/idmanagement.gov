@@ -2,8 +2,7 @@
     "anchor": "common_name:Federal Common Policy CA G2,organizational_unit_name:FPKI,organization_name:U.S. Government,country_name:US",
     "changes": {
         "new_certs": [
-            "common_name:Federal Common Policy CA G2,organizational_unit_name:FPKI,organization_name:U.S. Government,country_name:US:62449237138322073094860485755766278006",
-            "common_name:TSCP SHA384 Bridge CA,organizational_unit_name:CAs,organization_name:TSCP LLC,country_name:US:63066892568316077557303467276339909397"
+            "common_name:Federal Common Policy CA G2,organizational_unit_name:FPKI,organization_name:U.S. Government,country_name:US:62449237138322073094860485755766278006"
         ]
     },
     "issuers": [
