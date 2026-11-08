@@ -97,15 +97,23 @@ jobs:
         if: steps.week.outputs.skip != 'true'
         run: pip install --require-hashes --no-deps -r site/.github/fpki-crawler/requirements.txt
 
-      - name: Record whether DoD revocation servers respond
+      - name: Record whether revocation servers are reachable
         if: steps.week.outputs.skip != 'true'
         run: |
+          # A plain GET only shows whether the server answers. OCSP servers often close the
+          # connection without a reply, curl exit 52, which still means the server is reachable.
           for url in http://ocsp.disa.mil/ http://crl.disa.mil/ http://repo.fpki.gov/; do
-            result=$(curl -s -o /dev/null --max-time 10 -w '%{http_code} in %{time_total}s' "$url" || echo "no response within 10s")
-            echo "::notice title=Server check::$url $result"
+            read -r status seconds code message <<< "$(curl -s -o /dev/null --max-time 10 \
+              -w '%{http_code} %{time_total} %{exitcode} %{errormsg}' "$url" || true)"
+            case "$code" in
+              0)  result="reachable, HTTP $status" ;;
+              52) result="reachable, closed the connection without a reply" ;;
+              *)  result="not reachable, curl exit $code: $message" ;;
+            esac
+            echo "::notice title=Server check::$url $result, after ${seconds}s"
           done
 
-      - name: Crawl and check, rerunning when the result looks incomplete
+      - name: Crawl and check the result
         id: crawl
         if: steps.week.outputs.skip != 'true'
         env:

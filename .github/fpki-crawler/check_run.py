@@ -247,7 +247,8 @@ def main():
         print('removed:', entry['subject'], '|', entry['reason'])
     if os.environ.get('GITHUB_ACTIONS'):
         # Annotations are readable on public repositories without signing in.
-        level = 'notice' if summary['outcome'] == 'publish' else 'error'
+        # A review result still opens a draft PR, so it is a warning, not an error.
+        level = {'publish': 'notice', 'review': 'warning'}.get(summary['outcome'], 'error')
         reasons = summary['problems'] + summary['rerun_reasons'] + summary['review_reasons']
         print(f"::{level} title=Check result: {summary['outcome']}::"
               f"{'; '.join(reasons) or 'no issues'}. Added {len(summary['added'])}, removed {len(summary['removed'])}.")
