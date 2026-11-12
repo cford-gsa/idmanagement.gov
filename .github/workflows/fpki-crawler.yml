@@ -106,6 +106,9 @@ jobs:
           # Java waits 15 seconds for each unreachable OCSP server, but the crawler stops the
           # Java helper after 10. Accepted certificates are decided by CRLs, so wait 1 second.
           JAVA_TOOL_OPTIONS: -Dcom.sun.security.ocsp.timeout=1
+          # The crawler dates the graph with the local day. Use the same time zone as the
+          # notifications page date so a late evening run doesn't publish two different days.
+          TZ: America/New_York
         run: |
           result=fail
           for attempt in $(seq 1 "$ATTEMPTS"); do

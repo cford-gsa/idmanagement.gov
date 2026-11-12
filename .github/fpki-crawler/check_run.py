@@ -25,6 +25,7 @@ ROOT_SHA256 = '5f9aecc24616b2191372600dd80f6dd320c8ca5a0ceb7f09c985ebf0696934fc'
 CORE = ('common_name:Federal Bridge CA', 'common_name:Federal Common Policy CA')
 HELPER_FAILURES = ('Pathbuilder timed out', 'Calling pathbuilder failed')
 VANISHED_LIMIT = 2
+EXPIRING_DAYS = 90
 PUBLISH, RERUN, REVIEW, FAIL = 0, 10, 20, 1
 
 
@@ -71,6 +72,12 @@ def key(record):
 
 def short(name):
     return name.split(',')[0].split(':', 1)[-1]
+
+
+def fetches(report):
+    # Present only in reports from crawler versions that record each repository fetch.
+    entries = report.get('fetches')
+    return {entry['url']: entry for entry in entries if 'url' in entry} if isinstance(entries, list) else None
 
 
 def details(der, cert):
@@ -142,8 +149,34 @@ def check(run_dir, baseline_dir, exclusions_file=None, today=None):
         else:
             record['_why'] = 'not found this run'
             vanished.append(record)
+    new_fetches, old_fetches = fetches(report), fetches(old_report)
+    failed_fetches = [entry for entry in (new_fetches or {}).values()
+                      if entry.get('status') not in ('OK', 'SKIPPED')]
+    # A repository that held certificates last time and failed this time explains a drop.
+    failed_sources = [entry for entry in failed_fetches
+                      if (old_fetches or {}).get(entry['url'], {}).get('certificates', 0) > 0]
     if len(vanished) >= VANISHED_LIMIT:
         reruns.append(f'{len(vanished)} certificates disappeared without expiring or being rejected')
+    elif vanished and failed_sources:
+        sources = f"{len(failed_sources)} {'repository' if len(failed_sources) == 1 else 'repositories'}"
+        reruns.append(f'{len(vanished)} certificate disappeared while {sources} '
+                      'that had certificates last time could not be read')
+    for entry in failed_fetches:
+        warnings.append(f"Repository {entry['url']} could not be read: {entry.get('status')}"
+                        + (f" ({entry['detail'][:200]})" if entry.get('detail') else ''))
+    changed_sources = []
+    if new_fetches is not None and old_fetches is not None:
+        for url in sorted(new_fetches):
+            new, old = new_fetches[url], old_fetches.get(url)
+            if new.get('status') != 'OK':
+                continue
+            if old is None:
+                changed_sources.append({'url': url, 'change': 'new repository',
+                                        'certificates': new.get('certificates', 0)})
+            elif (new.get('bytes'), new.get('last-modified')) != (old.get('bytes'), old.get('last-modified')):
+                change = f"{old.get('certificates', 0)} to {new.get('certificates', 0)} certificates"
+                changed_sources.append({'url': url, 'change': change,
+                                        'last_modified': new.get('last-modified', 'not given')})
 
     old_keys = {key(r) for r in old_valid}
     returns = [r for r in valid if key(r) not in old_keys
@@ -152,6 +185,15 @@ def check(run_dir, baseline_dir, exclusions_file=None, today=None):
     for record in returns:
         reviews.append(f'New certificate issued to {short(record["subject"])} by '
                        f'{short(record["issuer"])}. Check whether it should be excluded')
+
+    expiring = []
+    for der, cert in bundle.values():
+        days = (cert.not_valid_after.date() - today).days
+        if days <= EXPIRING_DAYS:
+            entry = details(der, cert)
+            entry['days_left'] = days
+            expiring.append(entry)
+    expiring.sort(key=lambda entry: (entry['valid_to'], entry['subject']))
 
     added = [details(*bundle[s]) for s in sorted(set(bundle) - set(old_bundle))]
     removed_reasons = {int(r['serial-number']): r['_why'] for r in lost}
@@ -175,7 +217,10 @@ def check(run_dir, baseline_dir, exclusions_file=None, today=None):
         'warnings': warnings,
         'counts': {'bundle': len(bundle), 'previous_bundle': len(old_bundle), 'accepted': len(valid),
                    'rejected': len(bad), 'graph_nodes': len(nodes), 'graph_edges': len(edges)},
-        'added': added, 'removed': removed,
+        'added': added, 'removed': removed, 'expiring': expiring,
+        'repository_check': new_fetches is not None,
+        'failed_repositories': [entry['url'] for entry in failed_fetches],
+        'changed_repositories': changed_sources if old_fetches is not None else None,
         'left_out_by_exclusions': [f'{short(r["subject"])} <- {short(r["issuer"])}' for r in left_out],
     }
 
@@ -202,6 +247,22 @@ def body(summary, note):
             if 'reason' in entry:
                 lines.append(f'  - Reason: {entry["reason"]}')
         lines.append('')
+    expiring = summary.get('expiring', [])
+    lines.append(f'### Expiring within {EXPIRING_DAYS} days ({len(expiring)})')
+    if not expiring:
+        lines.append('None.')
+    for entry in expiring:
+        when = 'today' if entry['days_left'] == 0 else f"in {entry['days_left']} days"
+        lines.append(f"- **{entry['subject']}**, issued by {entry['issuer']}: "
+                     f"expires {entry['valid_to']} ({when}). SHA-1: `{entry['sha1']}`")
+    lines.append('')
+    changed = summary.get('changed_repositories')
+    if changed:
+        lines.append(f'### Repositories changed since the last run ({len(changed)})')
+        for entry in changed:
+            note = f", last modified {entry['last_modified']}" if 'last_modified' in entry else ''
+            lines.append(f"- {entry['url']}: {entry['change']}{note}")
+        lines.append('')
     if summary['left_out_by_exclusions']:
         lines.append('Left out of the bundle by the exclusion list: '
                      + '; '.join(summary['left_out_by_exclusions']) + '.')
@@ -210,6 +271,10 @@ def body(summary, note):
         lines += ['**Warnings:**', ''] + [f'- {w}' for w in summary['warnings']] + ['']
     lines.append(f'Report: {counts["accepted"]} accepted, {counts["rejected"]} rejected. '
                  f'Graph: {counts["graph_nodes"]} authorities, {counts["graph_edges"]} relationships.')
+    if summary.get('repository_check'):
+        failed = len(summary.get('failed_repositories', []))
+        lines.append('Repositories: ' + (f'{failed} could not be read; see the warnings.' if failed
+                                         else 'every repository was read.'))
     if note:
         lines += ['', note]
     return '\n'.join(lines) + '\n'
