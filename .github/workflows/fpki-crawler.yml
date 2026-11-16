@@ -170,6 +170,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: staging
+          persist-credentials: false
 
       - uses: actions/download-artifact@v8
         with:
@@ -199,16 +200,16 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           branch="fpki-crawler/$WEEK"
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git switch -c "$branch"
-          git add _implement/fpki_notifications.md _implement/tools
-          git commit -m "automatic crawler update ($RUN_DATE)"
-          # A branch left by an earlier run this week is replaced, but only if it is still the
-          # version seen here. An empty value means the branch must not exist.
-          seen="$(git ls-remote origin "refs/heads/$branch" | cut -f1)"
-          git push --force-with-lease="refs/heads/$branch:$seen" origin "$branch"
-          commit="$(git rev-parse --short HEAD)"
+          # The commit is made through the GitHub API so GitHub signs it, because staging
+          # only accepts signed commits. A branch left by an earlier run this week is replaced.
+          made="$(python3 .github/fpki-crawler/commit_update.py "$branch" \
+            "$(git rev-parse HEAD)" "automatic crawler update ($RUN_DATE)" \
+            $(git status --porcelain | sed 's/^...//'))"
+          read -r sha signed <<< "$made"
+          commit="${sha:0:8}"
+          if [ "$signed" != verified ]; then
+            echo "::warning title=Commit not verified::GitHub did not sign commit $commit, so staging will not accept it."
+          fi
           echo "Result: **$RESULT**. Branch \`$branch\` holds commit \`$commit\`." >> "$GITHUB_STEP_SUMMARY"
 
           title="automatic crawler update, $(date -d "$RUN_DATE" '+%b %-d, %Y')"
